@@ -4,49 +4,40 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from backend.core.config import settings
 
-# Explicitly ensure the API key is mirrored in the environment for the Google GenAI SDK
 if settings.GEMINI_API_KEY:
     os.environ["GEMINI_API_KEY"] = settings.GEMINI_API_KEY
 
 class RAGService:
     def __init__(self):
         print("Loading local FAISS database and embedding model...")
-        # Re-initialize the exact same local text embedding model used in ingest.py
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Load the saved local index from disk
         self.vector_store = FAISS.load_local(
             settings.VECTOR_STORE_DIR, 
             self.embeddings, 
             allow_dangerous_deserialization=True
         )
-        
-        # Initialize Gemini API cleanly
-        # Note: 'api_key' is used here instead of 'google_api_key'
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash", 
             api_key=settings.GEMINI_API_KEY,
-            temperature=0.2  # Low temperature keeps answers factual and grounded
+            temperature=0.2
         )
-        print("RAG Engine initialized successfully.")
+        
+        # NEW: Simple in-memory session manager
+        # Structure: { "session_123": [("human", "hi"), ("ai", "hello")] }
+        self.sessions = {}
+        print("RAG Engine with Conversational Memory initialized.")
 
-    def answer_query(self, query: str) -> dict:
-        # 1. Semantic Search: Pull top 3 closest matching paragraphs from FAISS
+    def answer_query(self, query: str, session_id: str = "default") -> dict:
+        # 1. Semantic Search (Look up context chunks using the raw query)
         docs = self.vector_store.similarity_search(query, k=3)
+        context_str = "\n\n---\n\n".join([doc.page_content for doc in docs])
+        clean_sources = list(set([os.path.basename(doc.metadata.get("source", "Unknown")) for doc in docs]))
         
-        # 2. Extraction: Compile retrieved text and collect individual source filenames
-        context_chunks = []
-        sources = []
-        for doc in docs:
-            context_chunks.append(doc.page_content)
-            source_path = doc.metadata.get("source", "Unknown Source")
-            sources.append(os.path.basename(source_path))
-            
-        # Join chunks into one unified text block for the context window
-        context_str = "\n\n---\n\n".join(context_chunks)
-        clean_sources = list(set(sources)) # Deduplicate sources
+        # 2. Retrieve or initialize historical logs for this specific user session
+        if session_id not in self.sessions:
+            self.sessions[session_id] = []
         
-        # 3. Context Injection: Build standard explicit system instructions
+        # 3. Structural Prompt Engineering
         system_prompt = (
             "You are a professional customer support assistant specializing in Bharti AXA Life Insurance.\n"
             "Answer the user's question accurately using ONLY the provided context below. "
@@ -56,18 +47,26 @@ class RAGService:
             f"Context:\n{context_str}"
         )
         
-        # 4. Generation: Send structured prompt messages directly to the LLM
-        messages = [
-            ("system", system_prompt),
-            ("human", query)
-        ]
+        # Assemble the message sequence: System rules -> Past conversation -> New query
+        messages = [("system", system_prompt)]
         
+        # Append rolling historical context
+        for role, text in self.sessions[session_id]:
+            messages.append((role, text))
+            
+        # Append current user prompt
+        messages.append(("human", query))
+        
+        # 4. Generation
         response = self.llm.invoke(messages)
+        
+        # 5. Memory Storage: Save this turn to lock context for the next follow-up question
+        self.sessions[session_id].append(("human", query))
+        self.sessions[session_id].append(("ai", response.content))
         
         return {
             "answer": response.content,
             "sources": clean_sources
         }
 
-# Singleton instance to avoid reloading files on every API hit
 rag_engine = RAGService()
