@@ -4,11 +4,10 @@ from backend.services.rag_service import rag_engine
 
 router = APIRouter(prefix="/api", tags=["Chat"])
 
-# Define the structure of the incoming request from Lovable
 class ChatRequest(BaseModel):
     message: str
+    session_id: str = "default"  # NEW: Tracks individual conversation lines
 
-# Define the structure of the JSON response sent back to Lovable
 class ChatResponse(BaseModel):
     query: str
     answer: str
@@ -20,8 +19,8 @@ async def chat_endpoint(payload: ChatRequest):
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
         
     try:
-        # Pass user question into our RAG service
-        result = rag_engine.answer_query(payload.message)
+        # Pass both query and session id into our memory-aware engine
+        result = rag_engine.answer_query(payload.message, payload.session_id)
         
         return ChatResponse(
             query=payload.message,
