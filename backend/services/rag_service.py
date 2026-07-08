@@ -1,4 +1,6 @@
 import os
+import json
+import redis
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -22,10 +24,28 @@ class RAGService:
             temperature=0.2
         )
         
-        # NEW: Simple in-memory session manager
-        # Structure: { "session_123": [("human", "hi"), ("ai", "hello")] }
-        self.sessions = {}
-        print("RAG Engine with Conversational Memory initialized.")
+        # NEW: Hook up Redis to manage persistent chat logs
+        self.redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        print("RAG Engine with Redis Persistent Conversational Memory initialized.")
+
+    def get_session_history(self, session_id: str) -> list:
+        """Helper to safely fetch chat conversation lists straight from Redis."""
+        try:
+            key = f"chat:history:{session_id}"
+            history_raw = self.redis_client.get(key)
+            if history_raw:
+                return json.loads(history_raw)
+        except Exception as e:
+            print(f"[Redis Memory Warning] Failed to fetch historical logs: {e}")
+        return []
+
+    def save_session_history(self, session_id: str, history: list):
+        """Helper to save running chat lists safely to your Mac disk layout."""
+        try:
+            key = f"chat:history:{session_id}"
+            self.redis_client.set(key, json.dumps(history))
+        except Exception as e:
+            print(f"[Redis Memory Warning] Failed to write historical logs: {e}")
 
     def answer_query(self, query: str, session_id: str = "default") -> dict:
         # 1. Semantic Search (Look up context chunks using the raw query)
@@ -33,9 +53,8 @@ class RAGService:
         context_str = "\n\n---\n\n".join([doc.page_content for doc in docs])
         clean_sources = list(set([os.path.basename(doc.metadata.get("source", "Unknown")) for doc in docs]))
         
-        # 2. Retrieve or initialize historical logs for this specific user session
-        if session_id not in self.sessions:
-            self.sessions[session_id] = []
+        # 2. REPLACED: Fetch persistent logs directly out of Redis database storage
+        session_history = self.get_session_history(session_id)
         
         # 3. Structural Prompt Engineering
         system_prompt = (
@@ -51,7 +70,7 @@ class RAGService:
         messages = [("system", system_prompt)]
         
         # Append rolling historical context
-        for role, text in self.sessions[session_id]:
+        for role, text in session_history:
             messages.append((role, text))
             
         # Append current user prompt
@@ -60,13 +79,18 @@ class RAGService:
         # 4. Generation
         response = self.llm.invoke(messages)
         
-        # 5. Memory Storage: Save this turn to lock context for the next follow-up question
-        self.sessions[session_id].append(("human", query))
-        self.sessions[session_id].append(("ai", response.content))
+        # 5. REPLACED: Update message arrays and write them safely back to Redis
+        session_history.append(("human", query))
+        session_history.append(("ai", response.content))
+        self.save_session_history(session_id, session_history)
         
         return {
             "answer": response.content,
             "sources": clean_sources
         }
+
+    def embed_text(self, text: str) -> list:
+        """Exposes the internal embedding service tool directly to endpoints layer."""
+        return self.embeddings.embed_query(text)
 
 rag_engine = RAGService()
