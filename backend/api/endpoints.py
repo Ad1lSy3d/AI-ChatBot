@@ -9,9 +9,6 @@ from backend.services.cache_service import semantic_cache
 
 router = APIRouter(prefix="/api", tags=["Chat"])
 
-# =====================================================================
-# AUDIO CLEANING HELPER
-# =====================================================================
 def clean_text_for_speech(text: str) -> str:
     """Removes markdown formatting syntax so the TTS engine doesn't read it literally."""
     text = re.sub(r'[\*_]', '', text)
@@ -20,7 +17,7 @@ def clean_text_for_speech(text: str) -> str:
     return text
 
 # =====================================================================
-# DATA SCHEMAS
+# DATA SCHEMAS (RESTORED TO ORIGINAL FORMAT)
 # =====================================================================
 class ChatRequest(BaseModel):
     message: str
@@ -30,8 +27,7 @@ class ChatResponse(BaseModel):
     query: str
     answer: str
     sources: list[str]
-    audio_base64: str
-    session_id: str  # UPDATED: Echoing session back keeps frontend states synchronized
+    audio_base64: str  # FIXED: Removed session_id to satisfy strict frontend schema parsers
 
 # =====================================================================
 # TEXT GATEWAY ENDPOINT
@@ -50,11 +46,10 @@ async def chat_endpoint(payload: ChatRequest):
                 query=payload.message,
                 answer=cached_hit["answer"],
                 sources=cached_hit["sources"],
-                audio_base64=cached_hit["audio_base64"],
-                session_id=payload.session_id
+                audio_base64=cached_hit["audio_base64"]
             )
             
-        print("🔍 [REDIS CACHE MISS - TEXT] Running local FAISS extraction and Cloud LLM synthesis...")
+        print("[REDIS CACHE MISS - TEXT] Running local FAISS extraction and Cloud LLM synthesis...")
         result = rag_engine.answer_query(payload.message, payload.session_id)
         
         speech_text = clean_text_for_speech(result["answer"])
@@ -71,34 +66,42 @@ async def chat_endpoint(payload: ChatRequest):
             query=payload.message,
             answer=result["answer"],  
             sources=result["sources"],
-            audio_base64=audio_payload,
-            session_id=payload.session_id
+            audio_base64=audio_payload
         )
     except Exception as e:
-        print(f" TEXT ENDPOINT CRASH: {str(e)}")
+        print(f"TEXT ENDPOINT CRASH: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Text Error: {str(e)}")
 
 
 # =====================================================================
-# FIXED: SESSION HISTORY RETRIEVAL ENDPOINT (RETURNS RAW LIST)
+# COMPATIBLE SESSION HISTORY RETRIEVAL ENDPOINT
 # =====================================================================
 @router.get("/chat/history/{session_id}")
 async def get_chat_history(session_id: str):
-    """Fetches history arrays from Redis as a raw list to prevent frontend loop crashes."""
+    """Fetches history arrays with structural aliases to prevent frontend rendering skips."""
     try:
         raw_history = rag_engine.get_session_history(session_id)
         
         formatted_messages = []
         for role, text in raw_history:
-            ui_role = "user" if role == "human" else "assistant"
-            formatted_messages.append({"role": ui_role, "content": text})
+            is_human = (role == "human")
             
-        # FIX: Return raw array straight to frontend array parameters
+            # Generate a payload containing multiple format variations
+            # This ensures compatibility regardless of the required keys (role/sender, content/text)
+            message_packet = {
+                "role": "user" if is_human else "assistant",
+                "sender": "user" if is_human else "bot",
+                "content": text,
+                "text": text,
+                "message": text
+            }
+            formatted_messages.append(message_packet)
+            
         return formatted_messages
         
     except Exception as e:
-        print(f" HISTORY ENDPOINT CRASH: {str(e)}")
+        print(f"HISTORY ENDPOINT CRASH: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to look up past logs: {str(e)}")
 
@@ -122,13 +125,12 @@ async def voice_chat_endpoint(
         
         cached_hit = semantic_cache.get_cached_response(user_transcription, query_vector)
         if cached_hit:
-            print(" [REDIS CACHE HIT - VOICE] Intercepted transcribed text and bypassed pipeline!")
+            print("[REDIS CACHE HIT - VOICE] Intercepted transcribed text and bypassed pipeline!")
             return ChatResponse(
                 query=user_transcription,
                 answer=cached_hit["answer"],
                 sources=cached_hit["sources"],
-                audio_base64=cached_hit["audio_base64"],
-                session_id=session_id
+                audio_base64=cached_hit["audio_base64"]
             )
             
         print("🔍 [REDIS CACHE MISS - VOICE] Running full local RAG pipeline...")
@@ -148,10 +150,9 @@ async def voice_chat_endpoint(
             query=user_transcription,
             answer=rag_result["answer"],
             sources=rag_result["sources"],
-            audio_base64=audio_payload,
-            session_id=session_id
+            audio_base64=audio_payload
         )
     except Exception as e:
-        print(f" VOICE ENDPOINT CRASH: {str(e)}")
+        print(f"VOICE ENDPOINT CRASH: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Voice Loop Error: {str(e)}")
