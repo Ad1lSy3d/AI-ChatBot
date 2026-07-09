@@ -4,8 +4,8 @@ import redis
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq         # NEW: Groq integration
-from langchain_openai import ChatOpenAI     # NEW: OpenRouter integration
+from langchain_groq import ChatGroq         
+from langchain_openai import ChatOpenAI     
 from backend.core.config import settings
 
 if settings.GEMINI_API_KEY:
@@ -28,9 +28,9 @@ class RAGService:
             temperature=0.2
         )
         
-        # 🟡 Tier 2: Secondary Failover (Groq Client initialization)
+        # 🟡 Tier 2: Secondary Failover (Groq)
         groq_key = os.getenv("GROQ_API_KEY") or getattr(settings, "GROQ_API_KEY", None)
-        if groq_key and not groq_key.startswith("gsk_YOUR"):
+        if groq_key and "YOUR_REAL" not in groq_key:
             self.groq_llm = ChatGroq(
                 model="llama-3.1-8b-instant",
                 groq_api_key=groq_key,
@@ -41,9 +41,9 @@ class RAGService:
             self.groq_llm = None
             print("Tier 2 Failover [Groq] skipped: No API Key provided.")
 
-        # 🟠 Tier 3: Tertiary Failover (OpenRouter Client initialization)
+        # 🟠 Tier 3: Tertiary Failover (OpenRouter) - FIXED LOGICAL FLIP HERE
         or_key = os.getenv("OPENROUTER_API_KEY") or getattr(settings, "OPENROUTER_API_KEY", None)
-        if or_key and not or_key.startswith("sk-or-"):
+        if or_key and "YOUR_REAL" not in or_key:
             self.openrouter_llm = ChatOpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 model="meta-llama/llama-3.1-8b-instruct:free",
@@ -98,22 +98,16 @@ class RAGService:
         
         answer_content = ""
         
-        # =====================================================================
-        # AUTOMATED FAILOVER ROUTING LOGIC
-        # =====================================================================
         try:
-            # 🏁 ATTEMPT TIER 1: Primary Gemini execution
-            print("🤖 [TIER 1] Polling primary Gemini-2.5-Flash cluster...")
+            print("[TIER 1] Polling primary Gemini-2.5-Flash cluster...")
             response = self.llm.invoke(messages)
             answer_content = response.content
             
         except Exception as tier1_err:
             err_str = str(tier1_err).upper()
-            # Catch strict billing quota blocks or standard 429 resource ceiling limits
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "QUOTA" in err_str:
                 print("[TIER 1 CRITICAL] Gemini free tier exhausted or rate-limited.")
                 
-                # 🔄 ATTEMPT TIER 2: Seamless migration to Groq Cloud infrastructure
                 if self.groq_llm:
                     try:
                         print("[FAILOVER -> TIER 2] Routing query to Groq Llama-3.1 engine...")
@@ -122,16 +116,12 @@ class RAGService:
                         print("⚡ Tier 2 Processing Successful.")
                     except Exception as tier2_err:
                         print(f"[TIER 2 FAILED] Groq endpoint connection dropped: {tier2_err}")
-                        # Fallthrough directly to Tier 3 if Groq fails
                         answer_content = self._execute_tier3_fallback(messages)
                 else:
-                    # No Groq setup, bypass straight to OpenRouter
                     answer_content = self._execute_tier3_fallback(messages)
             else:
-                # If it's a structural syntax break instead of a rate limit, raise it to terminal log output
                 raise tier1_err
 
-        # Save context to memory bank
         session_history.append(("human", query))
         session_history.append(("ai", answer_content))
         self.save_session_history(session_id, session_history)
@@ -142,9 +132,8 @@ class RAGService:
         }
 
     def _execute_tier3_fallback(self, messages: list) -> str:
-        """Private helper to process backup calls via OpenRouter global edge endpoints."""
         if self.openrouter_llm:
-            print("[FAILOVER -> TIER 3] Routing query to OpenRouter Llama-3.1-Free cluster...")
+            print("🔀 [FAILOVER -> TIER 3] Routing query to OpenRouter Llama-3.1-Free cluster...")
             response = self.openrouter_llm.invoke(messages)
             return response.content
         else:
