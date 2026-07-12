@@ -69,7 +69,7 @@ The application follows a cache-first Retrieval-Augmented Generation (RAG) pipel
                                                                      |
                                           +──────────────────────────┴──────────────────────────+
                                           |                                                     |
-                                 [🚀 CACHE HIT < 0.1]                                  [🔍 CACHE MISS >= 0.1]
+                                 [CACHE HIT < 0.1]                                  [CACHE MISS >= 0.1]
                                           |                                                     |
                                           v                                                     v
                               +───────────────────────+                             +────────────────────────+
